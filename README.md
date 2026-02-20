@@ -1,18 +1,18 @@
 # dbt-doc-inherit
 
-A dbt package that propagates column descriptions along the DAG, so you define a description once and inherit it downstream.
+A pure dbt package that propagates column descriptions along the DAG — define a description once, inherit it downstream.
 
 ## The Problem
 
-In dbt, column descriptions must be manually repeated in every model's schema YAML — even when columns pass through unchanged. A `customer_id` column defined at the source layer needs its description copied into staging, intermediate, and mart YAMLs. This is tedious, error-prone, and violates DRY.
+dbt has a long-standing gap ([#2995](https://github.com/dbt-labs/dbt-core/issues/2995), [#4312](https://github.com/dbt-labs/dbt-core/issues/4312), [#1158](https://github.com/dbt-labs/dbt-core/issues/1158), [Discussion #6527](https://github.com/dbt-labs/dbt-core/discussions/6527)): column descriptions must be manually repeated across every model, even when columns pass through unchanged. A `customer_id` defined at the source layer needs its description copied into staging, intermediate, and mart YAMLs. This is tedious, error-prone, and violates DRY.
 
-## How It Works
+No `packages.yml`-installable solution exists today. Existing tools like [dbt-osmosis](https://github.com/z3z1ma/dbt-osmosis) and [dbt-colibri](https://github.com/b-ned/dbt-colibri) are Python CLI tools that require `pip install` — they can't be added as a dbt dependency.
 
-`dbt-doc-inherit` provides two mechanisms:
+`dbt-doc-inherit` fills that gap as a **pure dbt package**:
 
-1. **Auto-propagation** — columns with empty descriptions automatically inherit from upstream parents when the column name matches exactly and only one parent has that column documented.
-
-2. **Explicit inheritance** via `inherit_desc()` — for renamed columns or ambiguous cases (JOINs where multiple parents share a column name), you specify exactly where to inherit from.
+- **Auto-propagates** descriptions by matching column names along the DAG
+- **Supports explicit inheritance** for renamed/ambiguous columns via `inherit_desc()`
+- **Outputs a formatted audit report** when `dbt run-operation propagate_descriptions` is executed
 
 ## Installation
 
@@ -20,15 +20,8 @@ Add to your `packages.yml`:
 
 ```yaml
 packages:
-  - local: /path/to/dbt_doc_inherit
-```
-
-Or once published to dbt Hub:
-
-```yaml
-packages:
-  - package: your_org/dbt_doc_inherit
-    version: "1.0.0"
+  - git: "https://github.com/tripleaceme/dbt-doc-inherit.git"
+    revision: master
 ```
 
 Then run:
@@ -45,14 +38,15 @@ dbt deps
 dbt run-operation propagate_descriptions
 ```
 
-This scans your entire project and logs a report showing:
+This scans your entire project's DAG and logs a console report showing:
 - Which columns can auto-inherit descriptions from upstream
-- Which columns need explicit `inherit_desc()` directives
+- Which columns are ambiguous and need explicit `inherit_desc()` directives
+- Which columns have no upstream source
 - Which columns are already documented
 
 ### 2. Use `inherit_desc()` for renamed or ambiguous columns
 
-When a column is renamed between layers (e.g., `user_id` → `customer_id`), or when multiple parents have the same column name (JOINs), add an explicit directive:
+When a column is renamed between layers (e.g., `user_id` → `customer_id`), or when multiple parents have the same column name (JOINs), add an explicit directive in your schema YAML:
 
 ```yaml
 # models/marts/schema.yml
@@ -63,38 +57,33 @@ models:
         description: "{{ dbt_doc_inherit.inherit_desc('stg_customers', 'user_id') }}"
 ```
 
-This tells `propagate_descriptions` to look up `user_id` from `stg_customers` and resolve the description.
+This tells `propagate_descriptions` to look up the `user_id` description from `stg_customers` and resolve it in the report.
 
-## Report Format
+### 3. Review and act
 
-The console report shows actionable entries:
+The report tells you exactly what can be inherited and from where. Use it to:
+- Confirm auto-inherited descriptions are correct
+- Fix `unresolved` directives (typo in model/column name)
+- Add `inherit_desc()` for any `ambiguous` columns
+
+## `inherit_desc()` Syntax
 
 ```
-column_name                          | status                | inherited_description              | target_file                    | source_file
-─────────────────────────────────────|───────────────────────|────────────────────────────────────|────────────────────────────────|─────────────────────────
-dim_customers.customer_id            | inherited             | Unique customer identifier         | models/marts/marts.yml         | models/staging/staging.yml
-fct_orders.status                    | ambiguous (orders, ..)| —                                  | models/marts/marts.yml         | —
-fct_orders.new_metric                | no_source             | —                                  | models/marts/marts.yml         | —
+{{ dbt_doc_inherit.inherit_desc('<model_name>', '<column_name>') }}
 ```
 
-### Status Values
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `model_name` | Name of the upstream model or `source_name.table_name` for sources | `stg_customers`, `raw.orders` |
+| `column_name` | Name of the column in the upstream model | `user_id`, `status` |
 
-| Status | Meaning |
-|--------|---------|
-| `inherited` | Auto-propagated by matching column name (one parent match) |
-| `resolved` | Resolved from an `inherit_desc()` directive |
-| `ambiguous` | Multiple parents have this column — use `inherit_desc()` to specify |
-| `no_source` | No upstream parent has this column name |
-| `unresolved` | `inherit_desc()` target model or column not found |
-| `already_documented` | Column already has its own description (excluded from report) |
+### When to use it
 
-## When to Use `inherit_desc()`
-
-Use it when auto-propagation can't determine the correct source:
-
-- **Renamed columns**: `user_id` upstream → `customer_id` downstream
-- **Ambiguous columns**: A model JOINs two tables that both have a `status` column
-- **Cross-layer references**: Inheriting from a model that isn't a direct parent
+| Scenario | Example | Why auto-propagation fails |
+|----------|---------|---------------------------|
+| **Renamed column** | `user_id` → `customer_id` | Names don't match |
+| **Ambiguous column** | `status` exists in both `orders` and `delivery` after a JOIN | Multiple parents have the same column |
+| **Cross-layer reference** | Inherit from a grandparent model | Auto-propagation only checks direct parents |
 
 ```yaml
 columns:
@@ -102,23 +91,67 @@ columns:
   - name: customer_id
     description: "{{ dbt_doc_inherit.inherit_desc('stg_customers', 'user_id') }}"
 
-  # Ambiguous column (specify which parent)
+  # Ambiguous column — specify which parent
   - name: status
     description: "{{ dbt_doc_inherit.inherit_desc('orders', 'status') }}"
+
+  # Source column
+  - name: order_date
+    description: "{{ dbt_doc_inherit.inherit_desc('raw.orders', 'order_date') }}"
 ```
+
+## Report Format
+
+The console output from `propagate_descriptions` shows actionable entries (columns that are already documented are excluded):
+
+```
+═══════════════════════════════════════════════════════════════════════════════════════════════
+  dbt_doc_inherit: Column Inheritance Report
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+  Summary: 12 inherited | 3 resolved | 2 ambiguous | 1 no_source | 0 unresolved | 45 already_documented
+
+  column_name                          | status                | inherited_description              | target_file                    | source_file
+  ─────────────────────────────────────|───────────────────────|────────────────────────────────────|────────────────────────────────|─────────────────────────
+  dim_customers.customer_id            | resolved              | Unique customer identifier         | models/marts/marts.yml         | models/staging/staging.yml
+  fct_orders.order_id                  | inherited             | Primary key for orders             | models/marts/marts.yml         | models/staging/staging.yml
+  fct_orders.status                    | ambiguous (orders,..) | —                                  | models/marts/marts.yml         | —
+  fct_orders.new_metric                | no_source             | —                                  | models/marts/marts.yml         | —
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
+```
+
+### Status Values
+
+| Status | Meaning | Action needed |
+|--------|---------|---------------|
+| `inherited` | Auto-propagated by matching column name (one parent match) | None — description found |
+| `resolved` | Resolved from an `inherit_desc()` directive | None — description found |
+| `ambiguous` | Multiple parents have this column with descriptions | Add `inherit_desc()` to specify which parent |
+| `no_source` | No upstream parent has this column name documented | Document it manually or add `inherit_desc()` |
+| `unresolved` | `inherit_desc()` target model or column not found | Check for typos in model/column name |
+| `already_documented` | Column already has its own description | None — excluded from report |
+
+## Design Decisions
+
+1. **`inherit_desc()` in YAML** — returns a placeholder `"Inherited: model.column"` during the parse phase. The `propagate_descriptions` run-operation detects and resolves these during the execute phase. **Caveat**: `dbt docs generate` will show the placeholder text, not the resolved description. The resolved description is only visible in the console report.
+
+2. **Name matching only** for auto-propagation — no SQL parsing (that would require Python/SQLGlot, making this a CLI tool instead of a dbt package). For models with JOINs, users must use `inherit_desc()` for ambiguous or renamed columns.
+
+3. **Console-only output** — the report is logged to the terminal for the developer to review. No database tables are created.
 
 ## Known Limitations
 
-1. **No SQL parsing** — auto-propagation matches by column name only. It cannot determine which parent table a column comes from by parsing SQL. For models with JOINs, use `inherit_desc()` for ambiguous columns.
+1. **No SQL parsing** — auto-propagation matches by column name only. It cannot parse SQL to determine which parent table a column originates from (e.g., `SELECT or.status FROM orders or JOIN delivery de ...`). For models with JOINs, use `inherit_desc()` for any ambiguous columns.
 
-2. **Placeholder in dbt docs** — `inherit_desc()` returns a placeholder string (e.g., `"Inherited: stg_customers.user_id"`) during YAML parsing. `dbt docs generate` will show this placeholder. The fully resolved description is available in the `propagate_descriptions` console report.
+2. **Placeholder in dbt docs** — `inherit_desc()` returns a placeholder string (e.g., `"Inherited: stg_customers.user_id"`) during YAML parsing. `dbt docs generate` will display this placeholder. The fully resolved description is available in the `propagate_descriptions` console report.
 
-3. **YAML-defined columns only** — the package can only process columns that are listed in your schema YAML files. Columns that exist in the database but aren't in YAML are not visible to the package.
+3. **YAML-defined columns only** — the package can only process columns that are listed in your schema YAML files. Columns that exist in the database but aren't declared in YAML are invisible to the package.
 
-4. **Direct parents only** — auto-propagation checks only direct parent models (via `depends_on`), not grandparents. For multi-hop inheritance, each layer must be documented or use `inherit_desc()` pointing to the original source.
+4. **Direct parents only** — auto-propagation checks only direct parent models (via `depends_on`), not grandparents. For multi-hop inheritance, either document each intermediate layer or use `inherit_desc()` pointing to the original source.
 
 ## Compatibility
 
-- dbt Core: `>=1.6.0, <2.0.0`
-- Adapters: Any (uses cross-database type macros)
-- No external dependencies
+- **dbt Core**: `>=1.6.0, <2.0.0`
+- **Adapters**: Any (Snowflake, BigQuery, PostgreSQL, Redshift, Databricks, DuckDB, etc.)
+- **Dependencies**: None — pure Jinja, no external packages
