@@ -6,7 +6,7 @@ A dbt package that propagates column descriptions along the DAG — define a des
 
 dbt has a long-standing gap ([#2995](https://github.com/dbt-labs/dbt-core/issues/2995), [#4312](https://github.com/dbt-labs/dbt-core/issues/4312), [#1158](https://github.com/dbt-labs/dbt-core/issues/1158), [Discussion #6527](https://github.com/dbt-labs/dbt-core/discussions/6527)): column descriptions must be manually repeated across every model, even when columns pass through unchanged. A `customer_id` defined at the source layer needs its description copied into staging, intermediate, and mart YAMLs. This is tedious, error-prone, and violates DRY.
 
-Existing tools like [dbt-osmosis](https://github.com/z3z1ma/dbt-osmosis) and [dbt-colibri](https://github.com/b-ned/dbt-colibri) are Python CLI tools that require `pip install` — they can't be added as a dbt dependency.
+Existing tools like [dbt-osmosis](https://github.com/z3z1ma/dbt-osmosis) and [dbt-colibri](https://github.com/b-ned/dbt-colibri) are Python CLI tools that require `pip install`, they can't be added as a dbt dependency.
 
 `dbt-doc-inherit` fills that gap with two approaches:
 
