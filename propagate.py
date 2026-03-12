@@ -160,6 +160,27 @@ def resolve_inheritance(catalog):
     return entries
 
 
+def find_model_section(content, model_name):
+    """Find the start and end positions of a model section in YAML content."""
+    # Match "- name: model_name" at the model level (typically 2-space indent)
+    pattern = rf'^(\s*)- name:\s+{re.escape(model_name)}[ \t]*$'
+    match = re.search(pattern, content, re.MULTILINE)
+    if not match:
+        return None, None
+
+    start = match.start()
+    indent_len = len(match.group(1))
+
+    # Find the next model entry at the same indent level (or end of file)
+    next_model = re.search(
+        rf'^{" " * indent_len}- name:\s+\S+',
+        content[match.end():],
+        re.MULTILINE
+    )
+    end = match.end() + next_model.start() if next_model else len(content)
+    return start, end
+
+
 def write_to_yaml(entries):
     """Write resolved descriptions back to YAML files."""
     # Group writable changes by file
@@ -185,36 +206,44 @@ def write_to_yaml(entries):
 
         for update in updates:
             col_name = update["column_name"]
+            model_name = update["model_name"]
             new_desc = update["inherited_description"].replace("\\", "\\\\").replace('"', '\\"')
 
-            # Case 1: Column has a description line (possibly with blank lines between)
-            # Match: "- name: col_name" then optional blank lines, then "description: ..."
-            # Preserve existing whitespace/formatting between name and description
-            pattern = rf'(- name: {re.escape(col_name)}[ \t]*\n(?:\s*\n)*\s+description:\s*)"[^"]*"'
-            replacement = rf'\1"{new_desc}"'
-            new_content = re.sub(pattern, replacement, content, count=1)
+            # Find the model section to scope our search
+            model_start, model_end = find_model_section(content, model_name)
+            if model_start is None:
+                continue
 
-            if new_content != content:
-                content = new_content
+            section = content[model_start:model_end]
+
+            # Case 1: Column has its own description line directly after (only blank lines between)
+            pattern = rf'(- name: {re.escape(col_name)}[ \t]*\n(?:[ \t]*\n)*[ \t]+description:\s*)"[^"]*"'
+            replacement = rf'\1"{new_desc}"'
+            new_section = re.sub(pattern, replacement, section, count=1)
+
+            if new_section != section:
+                content = content[:model_start] + new_section + content[model_end:]
                 changes += 1
             else:
                 # Case 2: Column exists but has NO description line at all
-                # Only insert if the next non-blank line is NOT a description line
                 match = re.search(
                     rf'(\s+)(- name: {re.escape(col_name)})[ \t]*\n',
-                    content
+                    section
                 )
                 if match:
-                    # Check what follows: skip blank lines and see if description already exists
-                    end_pos = match.end()
-                    rest = content[end_pos:]
-                    # Strip leading blank lines to peek at next content line
-                    stripped = rest.lstrip('\n')
-                    if not stripped.lstrip().startswith('description:'):
+                    # Check next non-blank line — only skip if it's this column's description
+                    rest = section[match.end():]
+                    next_content_line = ''
+                    for line in rest.split('\n'):
+                        if line.strip():
+                            next_content_line = line.strip()
+                            break
+                    if not next_content_line.startswith('description:'):
                         indent = match.group(1) + "  "
                         old_str = match.group(0)
                         new_str = f"{match.group(1)}{match.group(2)}\n{indent}description: \"{new_desc}\"\n"
-                        content = content.replace(old_str, new_str, 1)
+                        new_section = section.replace(old_str, new_str, 1)
+                        content = content[:model_start] + new_section + content[model_end:]
                         changes += 1
 
         if changes > 0 and content != original:
@@ -237,7 +266,7 @@ def print_report(entries):
         elif s.startswith("ambiguous"):
             counts["ambiguous"] += 1
 
-    # Filter actionable entries
+    # Filter actionable entries (exclude already_documented)
     actionable = [e for e in entries if e["status"] != "already_documented"]
 
     bar = "=" * 140
@@ -247,7 +276,7 @@ def print_report(entries):
     print()
     print(f"  Summary: {counts['inherited']} inherited | {counts['resolved']} resolved | "
           f"{counts['ambiguous']} ambiguous | {counts['no_source']} no_source | "
-          f"{counts['unresolved']} unresolved | {counts['already_documented']} already_documented")
+          f"{counts['unresolved']} unresolved")
     print()
 
     if not actionable:
@@ -288,7 +317,7 @@ def print_report(entries):
         print(row)
 
     print(f"\n{bar}")
-    print(f"  dbt_doc_inherit: Complete. {len(entries)} columns processed.")
+    print(f"  dbt_doc_inherit: Complete. {len(actionable)} columns processed ({counts['already_documented']} already documented, skipped).")
 
 
 def main():
@@ -304,9 +333,12 @@ def main():
     # Write changes to YAML files
     writable = [e for e in entries if e["status"] in ("inherited", "resolved")]
     if writable:
-        print(f"\n  Writing {len(writable)} descriptions to YAML files...")
         total_files, total_cols = write_to_yaml(entries)
-        print(f"  Done: {total_cols} descriptions written across {total_files} file(s).")
+        if total_cols > 0:
+            print(f"\n  Done: {total_cols} descriptions written across {total_files} file(s).")
+        else:
+            print("\n  No changes needed — YAML files already up to date.")
+            print("  Tip: Run 'dbt parse' to refresh the manifest if descriptions were written in a previous run.")
     else:
         print("\n  No descriptions to write.")
 

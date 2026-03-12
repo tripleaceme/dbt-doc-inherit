@@ -60,11 +60,11 @@ Both approaches use the same resolution logic:
 |--------|---------|--------|
 | `inherited` | Auto-matched by column name (single source match) | None — description resolved |
 | `resolved` | Resolved from an `"Inherited: model.column"` directive | None — description resolved |
-| `override` | Source has a different description than the target (type=all) | Review and accept/reject |
+| `override` | Source has a different description than the target (type=all, run-operation only) | Review and accept/reject |
 | `ambiguous` | Multiple sources have this column name | Add `"Inherited: model.column"` to specify which |
-| `no_match` | No source model has this column name | Document manually or check the `from` file |
+| `no_match` / `no_source` | No source model has this column name | Document manually or check the `from` file |
 | `unresolved` | `"Inherited:"` target model or column not found | Check for typos in model/column name |
-| `already_documented` | Column already has its own description | Skipped |
+| `already_documented` | Column already has its own description | Skipped (hidden from reports) |
 
 ---
 
@@ -158,21 +158,18 @@ dbt run-operation propagate_descriptions \
 
 ## Approach 2: Python Script (Auto-Write)
 
-The Python script reads `target/manifest.json` and writes resolved descriptions directly into your YAML files — no copy-pasting required. This is the recommended approach for bulk population.
+The Python script reads `target/manifest.json` and writes resolved descriptions directly into your YAML files — no copy-pasting required. **This is the recommended approach for bulk population.**
 
 ### Prerequisites
 
-- Python 3 (no additional pip packages needed)
+- Python 3.6+ (no additional pip packages needed — standard library only)
 - A fresh `target/manifest.json` (run `dbt parse` or `dbt run` first)
 
 ### Basic Usage
 
 ```bash
-# Generate the manifest first
-dbt parse
-
-# Run the script from your dbt project root
-python dbt_packages/dbt_doc_inherit/propagate.py
+# Generate the manifest first, then run the script
+dbt parse && python dbt_packages/dbt_doc_inherit/propagate.py
 ```
 
 ### What It Does
@@ -181,7 +178,55 @@ python dbt_packages/dbt_doc_inherit/propagate.py
 2. **Auto-inherits** descriptions for columns with empty descriptions where a single parent match exists
 3. **Resolves `"Inherited:"`** directives — replaces `"Inherited: dim_users.username"` with the actual description
 4. **Writes directly** to your YAML files — no copy-paste needed
-5. **Prints a report** showing what was inherited, what's ambiguous, and what's unresolved
+5. **Prints a report** showing only actionable columns (inherited, resolved, ambiguous, unresolved). Already-documented columns are skipped
+6. **Idempotent** — safe to run multiple times. Re-running after all descriptions are populated produces zero file changes
+
+### Example Output
+
+First run (descriptions need writing):
+
+```
+dbt_doc_inherit: Loading manifest...
+dbt_doc_inherit: Built catalog with 32 entities.
+dbt_doc_inherit: Processed 192 columns across all models.
+  Updated models/obt/_obt_models.yml (2 columns)
+
+  Done: 2 descriptions written across 1 file(s).
+
+============================================================================================================================================
+  dbt_doc_inherit: Column Inheritance Report
+============================================================================================================================================
+
+  Summary: 2 inherited | 0 resolved | 0 ambiguous | 0 no_source | 0 unresolved
+
+  Column                                  Status     Inherited Description                               Target File                 Source File
+  ──────────────────────────────────────  ─────────  ──────────────────────────────────────────────────  ──────────────────────────  ───────────────────────────
+  obt_song_performance.is_explicit        inherited  Whether song has explicit content                   models/obt/_obt_models.yml  models/marts/_dim_songs.yml
+  obt_song_performance.duration_category  inherited  Duration classification: Short (<3min), Medium (3-  models/obt/_obt_models.yml  models/marts/_dim_songs.yml
+
+============================================================================================================================================
+  dbt_doc_inherit: Complete. 2 columns processed (190 already documented, skipped).
+```
+
+Subsequent run (everything up to date):
+
+```
+dbt_doc_inherit: Loading manifest...
+dbt_doc_inherit: Built catalog with 32 entities.
+dbt_doc_inherit: Processed 192 columns across all models.
+
+  No descriptions to write.
+
+============================================================================================================================================
+  dbt_doc_inherit: Column Inheritance Report
+============================================================================================================================================
+
+  Summary: 0 inherited | 0 resolved | 0 ambiguous | 0 no_source | 0 unresolved
+
+  All columns are already documented. Nothing to propagate.
+
+============================================================================================================================================
+```
 
 ### Workflow
 
@@ -211,9 +256,9 @@ python dbt_packages/dbt_doc_inherit/propagate.py
 **Before** running the script:
 ```yaml
 columns:
-  - name: email              # no description
+  - name: email              # no description — will auto-inherit
   - name: artist_country
-    description: "Inherited: dim_artists.country"
+    description: "Inherited: dim_artists.country"  # explicit directive
 ```
 
 **After** running the script:
@@ -239,7 +284,7 @@ description: "Inherited: <model_name>.<column_name>"
 
 | Scenario | Example | Why auto-matching fails |
 |----------|---------|------------------------|
-| **Renamed column** | `user_id` → `customer_id` | Names don't match |
+| **Renamed column** | `user_id` -> `customer_id` | Names don't match |
 | **Ambiguous column** | `artist_name` exists in `dim_songs`, `fct_streams`, and `dim_artists` | Multiple parents have the same column |
 | **Prefixed column** | `artist_total_albums` comes from `dim_artists.total_albums` | Names don't match |
 
@@ -288,6 +333,8 @@ For programmatic use in SQL models or other Jinja contexts (not YAML description
 3. **YAML-defined columns only** — the package only processes columns declared in your schema YAML. Columns in the database but not in YAML are invisible to the package.
 
 4. **Direct parents only** for auto-matching — auto-propagation checks direct parent models (via `depends_on`). For multi-hop inheritance, use `"Inherited:"` pointing to the original source.
+
+5. **Model-scoped YAML writes** — the Python script identifies the correct model section in YAML files before writing, ensuring columns with duplicate names across models in the same file are updated correctly.
 
 ## Known Limitations
 
