@@ -70,13 +70,6 @@ Both approaches use the same resolution logic:
 
 ## Approach 1: `dbt run-operation` (Copy-Paste)
 
-### Basic Usage
-
-```bash
-dbt run-operation propagate_descriptions \
-  --args '{"from": "models/staging/_stg_users.yml", "to": "models/marts/_dim_users.yml", "type": "missing"}'
-```
-
 ### Arguments
 
 | Argument | Required | Description |
@@ -85,21 +78,65 @@ dbt run-operation propagate_descriptions \
 | `to` | Yes | Target YAML file path where descriptions are needed |
 | `type` | No | `"missing"` (default) = only empty descriptions. `"all"` = inherit all matching columns, including overrides |
 
+### Single Source File
+
+When your target model inherits from one upstream model:
+
+```bash
+dbt run-operation propagate_descriptions \
+  --args '{"from": "models/staging/_stg_users.yml", "to": "models/marts/_dim_users.yml", "type": "missing"}'
+```
+
 ### Multiple Source Files
 
-When your target model inherits from several upstream models, pass multiple `from` paths separated by commas:
+When your target model inherits from several upstream models (e.g., an OBT joining users, songs, and streams), pass multiple `from` paths separated by commas:
 
 ```bash
 dbt run-operation propagate_descriptions \
   --args '{"from": "models/marts/_dim_users.yml,models/marts/_dim_songs.yml,models/marts/_fct_streams.yml", "to": "models/obt/_obt_models.yml", "type": "missing"}'
 ```
 
-### Example Output
+### Example Output (Single Source)
 
 ```
-════════════════════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
   dbt_doc_inherit: Propagation Report
-════════════════════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+  From:   models/staging/_stg_users.yml
+  To:     models/marts/_dim_users.yml
+  Type:   missing
+
+  Column                     Action     Description                              Source
+  ───────────────────────  ─────────  ─────────────────────────────────────────  ──────────────────────
+  dim_users.email            inherit    User email address                        stg_users.email
+  dim_users.signup_date      inherit    Timestamp when user signed up             stg_users.signup_date
+  dim_users.new_metric       no_match
+
+  Source columns available: 9
+  Summary: 2 inherited | 0 resolved | 0 overridden | 0 ambiguous | 1 no match | 0 unresolved
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  YAML Output — Copy into models/marts/_dim_users.yml:
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+# ── dim_users ──
+- name: email
+  description: "User email address"
+- name: signup_date
+  description: "Timestamp when user signed up"
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+  dbt_doc_inherit: Complete. 3 columns processed, 2 descriptions ready.
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+```
+
+### Example Output (Multiple Sources)
+
+```
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+  dbt_doc_inherit: Propagation Report
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
   From:
     - models/marts/_dim_users.yml
@@ -118,9 +155,9 @@ dbt run-operation propagate_descriptions \
   Source columns available: 47
   Summary: 32 inherited | 3 resolved | 0 overridden | 5 ambiguous | 2 no match | 0 unresolved
 
-────────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   YAML Output — Copy into models/obt/_obt_models.yml:
-────────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 # ── obt_customers ──
 - name: email
@@ -128,9 +165,9 @@ dbt run-operation propagate_descriptions \
 - name: artist_country
   description: "Standardized country of origin"
 
-════════════════════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
   dbt_doc_inherit: Complete. 44 columns processed, 35 descriptions ready.
-════════════════════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 ```
 
 ### Workflow
@@ -310,17 +347,6 @@ columns:
 ```
 
 > **Note:** The `"Inherited:"` string is a temporary placeholder. After running either approach, it gets replaced with the actual description from the referenced model.
-
-### The `inherit_desc()` Macro
-
-For programmatic use in SQL models or other Jinja contexts (not YAML descriptions), the package also provides:
-
-```sql
-{{ dbt_doc_inherit.inherit_desc('dim_artists', 'country') }}
-{# Returns: "Inherited: dim_artists.country" #}
-```
-
-> **Important:** dbt does not evaluate custom package macros in YAML description fields. Always write the `"Inherited: model.column"` string directly — do not use `{{ inherit_desc() }}` in YAML.
 
 ---
 
