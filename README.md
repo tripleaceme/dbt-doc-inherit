@@ -153,8 +153,8 @@ dbt run-operation propagate_descriptions \
   dbt_doc_inherit: Propagation Report
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-  From:   models/staging/_stg_users.yml
-  To:     models/marts/_dim_users.yml
+  From:   models/staging/_dim_users.yml
+  To:     models/marts/_obt_models.yml
   Type:   missing
 
   Column                     Action     Description                              Source
@@ -167,7 +167,7 @@ dbt run-operation propagate_descriptions \
   Summary: 2 inherited | 0 resolved | 0 overridden | 0 ambiguous | 1 no match | 0 unresolved
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  YAML Output — Copy into models/marts/_dim_users.yml:
+  YAML Output — Copy into models/marts/_obt_models.yml:
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 # ── dim_users ──
