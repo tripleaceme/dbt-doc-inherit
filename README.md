@@ -120,6 +120,8 @@ columns:
 
 ## Approach 1: `dbt run-operation` (Copy-Paste)
 
+![dbt run-operation propagate_descriptions output](Output.png)
+
 ### Arguments
 
 | Argument | Required | Description |
