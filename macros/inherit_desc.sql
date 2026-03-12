@@ -1,17 +1,25 @@
 {% macro inherit_desc(model_name, column_name) %}
     {#--
-        Explicit inheritance directive for renamed or ambiguous columns.
+        Generate an inheritance directive for renamed or ambiguous columns.
 
-        dbt does not support custom macros in YAML description fields.
-        Instead, use the placeholder string directly in your schema YAML:
+        dbt does not evaluate custom macros in YAML description fields.
+        Instead, write the directive string directly in your schema YAML:
 
             description: "Inherited: dim_users.username"
 
-        The propagate_descriptions run-operation detects this "Inherited: "
-        pattern and resolves it to the actual description from the source model.
+        The propagate_descriptions macro detects the "Inherited: " prefix
+        and resolves it to the actual description from the referenced model.
 
-        This macro is kept for programmatic use (e.g. in SQL models or
-        other macros) but should NOT be called in YAML description fields.
+        This macro is provided for programmatic use in SQL models or
+        other Jinja contexts where macro evaluation is supported.
+
+        Examples:
+            In YAML (use the string directly):
+                - name: user_display_name
+                  description: "Inherited: dim_users.username"
+
+            In SQL/Jinja (use the macro):
+                {{ dbt_doc_inherit.inherit_desc('dim_users', 'username') }}
     --#}
     {{- return("Inherited: " ~ model_name ~ "." ~ column_name) -}}
 {% endmacro %}

@@ -1,291 +1,363 @@
 {% macro propagate_descriptions() %}
     {#--
-        Propagate column descriptions along the dbt DAG.
+        Propagate column descriptions from source YAML file(s) to a target YAML.
 
-        Shows a report of which columns can inherit descriptions from upstream.
-        To write descriptions to your YAML files, run the Python script:
+        Args (passed via --args):
+            from:  Source YAML file path(s). Comma-separated for multiple sources.
+            to:    Target YAML file path (where descriptions are needed)
+            type:  "all" (inherit all matching columns) or "missing" (only empty descriptions)
 
-            python dbt_packages/dbt_doc_inherit/propagate.py
+        Usage:
+            Single source:
+                dbt run-operation propagate_descriptions \
+                  --args '{"from": "models/marts/_dim_users.yml", "to": "models/obt/_obt_models.yml", "type": "all"}'
 
-        To preview the report only (no file changes):
-            dbt run-operation propagate_descriptions
+            Multiple sources:
+                dbt run-operation propagate_descriptions \
+                  --args '{"from": "models/marts/_dim_users.yml,models/marts/_dim_songs.yml,models/marts/_fct_streams.yml", "to": "models/obt/_obt_models.yml", "type": "missing"}'
+
+        For renamed or ambiguous columns, use this placeholder in your YAML:
+            description: "Inherited: dim_users.username"
+
+        The macro resolves descriptions from the dbt graph and outputs
+        ready-to-paste YAML snippets. Copy the output into your target file.
     --#}
 
     {% if execute %}
 
-        {# ── Step 1: Build column catalog from graph ── #}
-        {% set column_catalog = {} %}
+        {% set from_raw  = kwargs.get('from', '') %}
+        {% set to_path   = kwargs.get('to', '') %}
+        {% set mode      = kwargs.get('type', 'missing') %}
+        {% set inherit_pattern = 'Inherited: ' %}
+
+        {# ── Validate arguments ── #}
+        {% if not from_raw or not to_path %}
+            {% set msg = [] %}
+            {% do msg.append("") %}
+            {% do msg.append("  Error: 'from' and 'to' arguments are required.") %}
+            {% do msg.append("") %}
+            {% do msg.append("  Usage:") %}
+            {% do msg.append("    dbt run-operation propagate_descriptions \\") %}
+            {% do msg.append('      --args \'{"from": "models/marts/_dim_users.yml", "to": "models/obt/_obt_models.yml", "type": "all"}\'') %}
+            {% do msg.append("") %}
+            {% do msg.append("  Multiple sources:") %}
+            {% do msg.append("    dbt run-operation propagate_descriptions \\") %}
+            {% do msg.append('      --args \'{"from": "models/marts/_dim_users.yml,models/marts/_dim_songs.yml", "to": "models/obt/_obt_models.yml"}\'') %}
+            {% do msg.append("") %}
+            {% do msg.append("  Arguments:") %}
+            {% do msg.append("    from   Source YAML file path(s), comma-separated for multiple") %}
+            {% do msg.append("    to     Target YAML file path (where descriptions are needed)") %}
+            {% do msg.append('    type   "all" = inherit all matching columns | "missing" = only empty descriptions (default)') %}
+            {% do msg.append("") %}
+            {{ print(msg | join('\n')) }}
+            {{ return('') }}
+        {% endif %}
+
+        {% if mode not in ['all', 'missing'] %}
+            {{ print("  Error: 'type' must be 'all' or 'missing'. Got: " ~ mode) }}
+            {{ return('') }}
+        {% endif %}
+
+        {# ── Parse comma-separated from paths ── #}
+        {% set from_paths = [] %}
+        {% for p in from_raw.split(',') %}
+            {% do from_paths.append(p | trim) %}
+        {% endfor %}
+
+        {# ── Step 1: Collect described columns from all 'from' files ── #}
+        {% set from_columns = {} %}
 
         {% for node in graph.nodes.values() %}
             {% if node.resource_type in ['model', 'seed'] %}
-                {% set node_columns = {} %}
-                {% for col_name, col in node.columns.items() %}
-                    {% do node_columns.update({
-                        col_name: {
-                            'description': col.description | default('', true),
-                            'data_type': col.data_type | default('', true)
-                        }
-                    }) %}
+                {% set fp = node.patch_path | default(node.original_file_path, true) %}
+                {% set np = fp.split('://')[1] if (fp and '://' in fp) else fp %}
+
+                {% set matched = namespace(found=false) %}
+                {% for from_path in from_paths %}
+                    {% if np and (np == from_path or np.endswith('/' ~ from_path) or from_path.endswith(np)) %}
+                        {% set matched.found = true %}
+                    {% endif %}
                 {% endfor %}
 
-                {% set file_path = node.patch_path | default(node.original_file_path, true) %}
-                {% if file_path and '://' in file_path %}
-                    {% set file_path = file_path.split('://')[1] %}
+                {% if matched.found %}
+                    {% for col_name, col in node.columns.items() %}
+                        {% set desc = (col.description | default('', true)) | trim %}
+                        {% if desc | length > 0 and not desc.startswith(inherit_pattern) %}
+                            {% if col_name not in from_columns %}
+                                {% do from_columns.update({col_name: []}) %}
+                            {% endif %}
+                            {% do from_columns[col_name].append({
+                                'model': node.name,
+                                'description': desc
+                            }) %}
+                        {% endif %}
+                    {% endfor %}
                 {% endif %}
-
-                {% do column_catalog.update({
-                    node.unique_id: {
-                        'name': node.name,
-                        'resource_type': node.resource_type,
-                        'columns': node_columns,
-                        'file_path': file_path,
-                        'depends_on': node.depends_on.nodes | default([], true)
-                    }
-                }) %}
             {% endif %}
         {% endfor %}
 
         {% for source in graph.sources.values() %}
-            {% set source_columns = {} %}
-            {% for col_name, col in source.columns.items() %}
-                {% do source_columns.update({
-                    col_name: {
-                        'description': col.description | default('', true),
-                        'data_type': col.data_type | default('', true)
-                    }
-                }) %}
+            {% set fp = source.original_file_path | default('', true) %}
+
+            {% set matched = namespace(found=false) %}
+            {% for from_path in from_paths %}
+                {% if fp and (fp == from_path or fp.endswith('/' ~ from_path) or from_path.endswith(fp)) %}
+                    {% set matched.found = true %}
+                {% endif %}
             {% endfor %}
 
-            {% set source_display_name = source.source_name ~ '.' ~ source.name %}
-
-            {% do column_catalog.update({
-                source.unique_id: {
-                    'name': source_display_name,
-                    'resource_type': 'source',
-                    'columns': source_columns,
-                    'file_path': source.original_file_path | default('', true),
-                    'depends_on': []
-                }
-            }) %}
-        {% endfor %}
-
-        {{ log("dbt_doc_inherit: Built catalog with " ~ column_catalog | length ~ " entities.", info=True) }}
-
-        {# ── Step 2: Resolve inheritance for each model/seed ── #}
-        {% set report_entries = [] %}
-        {% set inherit_pattern = 'Inherited: ' %}
-
-        {% for node_id, node_info in column_catalog.items() %}
-            {% if node_info.resource_type in ['model', 'seed'] %}
-
-                {% set parent_column_map = {} %}
-                {% for parent_id in node_info.depends_on %}
-                    {% if parent_id in column_catalog %}
-                        {% set parent = column_catalog[parent_id] %}
-                        {% for pcol_name, pcol_info in parent.columns.items() %}
-                            {% if pcol_info.description and pcol_info.description | trim | length > 0
-                               and not pcol_info.description.startswith(inherit_pattern) %}
-                                {% if pcol_name not in parent_column_map %}
-                                    {% do parent_column_map.update({pcol_name: []}) %}
-                                {% endif %}
-                                {% do parent_column_map[pcol_name].append({
-                                    'parent_name': parent.name,
-                                    'description': pcol_info.description,
-                                    'file_path': parent.file_path,
-                                    'column_name': pcol_name
-                                }) %}
-                            {% endif %}
-                        {% endfor %}
+            {% if matched.found %}
+                {% set src_display = source.source_name ~ '.' ~ source.name %}
+                {% for col_name, col in source.columns.items() %}
+                    {% set desc = (col.description | default('', true)) | trim %}
+                    {% if desc | length > 0 %}
+                        {% if col_name not in from_columns %}
+                            {% do from_columns.update({col_name: []}) %}
+                        {% endif %}
+                        {% do from_columns[col_name].append({
+                            'model': src_display,
+                            'description': desc
+                        }) %}
                     {% endif %}
                 {% endfor %}
+            {% endif %}
+        {% endfor %}
 
-                {% for col_name, col_info in node_info.columns.items() %}
-                    {% set desc = col_info.description | trim %}
-                    {% set entry = namespace(
-                        status='',
-                        inherited_description='',
-                        source_model='',
-                        source_column='',
-                        source_file_path=''
-                    ) %}
+        {# ── Step 2: Build full catalog for "Inherited:" directive resolution ── #}
+        {% set full_catalog = {} %}
 
-                    {% if desc.startswith(inherit_pattern) %}
-                        {% set directive = desc[inherit_pattern | length:] %}
-                        {% set parts = directive.split('.') %}
-                        {% if parts | length >= 2 %}
-                            {% set target_model = parts[0] %}
-                            {% set target_column = parts[1:] | join('.') %}
+        {% for node in graph.nodes.values() %}
+            {% if node.resource_type in ['model', 'seed'] %}
+                {% for col_name, col in node.columns.items() %}
+                    {% set desc = (col.description | default('', true)) | trim %}
+                    {% if desc | length > 0 and not desc.startswith(inherit_pattern) %}
+                        {% do full_catalog.update({node.name ~ '.' ~ col_name: desc}) %}
+                    {% endif %}
+                {% endfor %}
+            {% endif %}
+        {% endfor %}
 
-                            {% set resolved = namespace(found=false) %}
-                            {% for cat_id, cat_info in column_catalog.items() %}
-                                {% if cat_info.name == target_model or cat_info.name.endswith('.' ~ target_model) %}
-                                    {% if target_column in cat_info.columns %}
-                                        {% set source_desc = cat_info.columns[target_column].description | trim %}
-                                        {% if source_desc | length > 0 and not source_desc.startswith(inherit_pattern) %}
-                                            {% set entry.status = 'resolved' %}
-                                            {% set entry.inherited_description = source_desc %}
-                                            {% set entry.source_model = cat_info.name %}
-                                            {% set entry.source_column = target_column %}
-                                            {% set entry.source_file_path = cat_info.file_path %}
-                                            {% set resolved.found = true %}
-                                        {% endif %}
+        {% for source in graph.sources.values() %}
+            {% set src_display = source.source_name ~ '.' ~ source.name %}
+            {% for col_name, col in source.columns.items() %}
+                {% set desc = (col.description | default('', true)) | trim %}
+                {% if desc | length > 0 %}
+                    {% do full_catalog.update({
+                        src_display ~ '.' ~ col_name: desc,
+                        source.name ~ '.' ~ col_name: desc
+                    }) %}
+                {% endif %}
+            {% endfor %}
+        {% endfor %}
+
+        {# ── Step 3: Process target models from the 'to' file ── #}
+        {% set results = [] %}
+
+        {% for node in graph.nodes.values() %}
+            {% if node.resource_type in ['model', 'seed'] %}
+                {% set fp = node.patch_path | default(node.original_file_path, true) %}
+                {% set np = fp.split('://')[1] if (fp and '://' in fp) else fp %}
+
+                {% if np and (np == to_path or np.endswith('/' ~ to_path) or to_path.endswith(np)) %}
+
+                    {% for col_name, col in node.columns.items() %}
+                        {% set desc = (col.description | default('', true)) | trim %}
+                        {% set result = namespace(
+                            action='skip',
+                            new_desc='',
+                            source_ref=''
+                        ) %}
+
+                        {# Case 1: "Inherited: model.column" directive #}
+                        {% if desc.startswith(inherit_pattern) %}
+                            {% set directive = desc[inherit_pattern | length:] %}
+                            {% if directive in full_catalog %}
+                                {% set result.action = 'resolve' %}
+                                {% set result.new_desc = full_catalog[directive] %}
+                                {% set result.source_ref = directive %}
+                            {% else %}
+                                {% set result.action = 'unresolved' %}
+                                {% set result.source_ref = directive %}
+                            {% endif %}
+
+                        {# Case 2: Empty description — auto-inherit by column name #}
+                        {% elif desc | length == 0 %}
+                            {% if col_name in from_columns %}
+                                {% set matches = from_columns[col_name] %}
+                                {% if matches | length == 1 %}
+                                    {% set result.action = 'inherit' %}
+                                    {% set result.new_desc = matches[0].description %}
+                                    {% set result.source_ref = matches[0].model ~ '.' ~ col_name %}
+                                {% else %}
+                                    {% set model_names = [] %}
+                                    {% for m in matches %}
+                                        {% do model_names.append(m.model) %}
+                                    {% endfor %}
+                                    {% set result.action = 'ambiguous' %}
+                                    {% set result.source_ref = model_names | join(', ') %}
+                                {% endif %}
+                            {% else %}
+                                {% set result.action = 'no_match' %}
+                            {% endif %}
+
+                        {# Case 3: Has description #}
+                        {% else %}
+                            {% if mode == 'all' and col_name in from_columns %}
+                                {% set matches = from_columns[col_name] %}
+                                {% if matches | length == 1 %}
+                                    {% if matches[0].description != desc %}
+                                        {% set result.action = 'override' %}
+                                        {% set result.new_desc = matches[0].description %}
+                                        {% set result.source_ref = matches[0].model ~ '.' ~ col_name %}
                                     {% endif %}
                                 {% endif %}
-                            {% endfor %}
-
-                            {% if not resolved.found %}
-                                {% set entry.status = 'unresolved' %}
-                                {% set entry.inherited_description = '' %}
-                                {% set entry.source_model = target_model %}
-                                {% set entry.source_column = target_column %}
                             {% endif %}
-                        {% else %}
-                            {% set entry.status = 'unresolved' %}
                         {% endif %}
 
-                    {% elif desc | length == 0 %}
-                        {% if col_name in parent_column_map %}
-                            {% set matches = parent_column_map[col_name] %}
-                            {% if matches | length == 1 %}
-                                {% set match = matches[0] %}
-                                {% set entry.status = 'inherited' %}
-                                {% set entry.inherited_description = match.description %}
-                                {% set entry.source_model = match.parent_name %}
-                                {% set entry.source_column = match.column_name %}
-                                {% set entry.source_file_path = match.file_path %}
-                            {% else %}
-                                {% set parent_names = [] %}
-                                {% for m in matches %}
-                                    {% do parent_names.append(m.parent_name) %}
-                                {% endfor %}
-                                {% set entry.status = 'ambiguous (' ~ parent_names | join(', ') ~ ')' %}
-                                {% set entry.inherited_description = '' %}
-                            {% endif %}
-                        {% else %}
-                            {% set entry.status = 'no_source' %}
-                            {% set entry.inherited_description = '' %}
+                        {% if result.action != 'skip' %}
+                            {% do results.append({
+                                'model': node.name,
+                                'column': col_name,
+                                'action': result.action,
+                                'new_desc': result.new_desc,
+                                'source_ref': result.source_ref,
+                                'old_desc': desc
+                            }) %}
                         {% endif %}
+                    {% endfor %}
 
-                    {% else %}
-                        {% set entry.status = 'already_documented' %}
-                        {% set entry.inherited_description = desc %}
-                    {% endif %}
-
-                    {% do report_entries.append({
-                        'model_name': node_info.name,
-                        'column_name': col_name,
-                        'inherited_description': entry.inherited_description,
-                        'target_file_path': node_info.file_path,
-                        'source_model': entry.source_model,
-                        'source_column': entry.source_column,
-                        'source_file_path': entry.source_file_path,
-                        'status': entry.status
-                    }) %}
-                {% endfor %}
-
+                {% endif %}
             {% endif %}
         {% endfor %}
 
-        {{ log("dbt_doc_inherit: Processed " ~ report_entries | length ~ " columns across all models.", info=True) }}
-
-        {# ── Step 3: Log formatted report to console ── #}
-        {{ log("", info=True) }}
-        {{ log("═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════", info=True) }}
-        {{ log("  dbt_doc_inherit: Column Inheritance Report", info=True) }}
-        {{ log("═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════", info=True) }}
-        {{ log("", info=True) }}
-
-        {% set counts = namespace(inherited=0, resolved=0, ambiguous=0, no_source=0, already_documented=0, unresolved=0) %}
-
-        {% for entry in report_entries %}
-            {% if entry.status == 'inherited' %}
-                {% set counts.inherited = counts.inherited + 1 %}
-            {% elif entry.status == 'resolved' %}
-                {% set counts.resolved = counts.resolved + 1 %}
-            {% elif entry.status.startswith('ambiguous') %}
-                {% set counts.ambiguous = counts.ambiguous + 1 %}
-            {% elif entry.status == 'no_source' %}
-                {% set counts.no_source = counts.no_source + 1 %}
-            {% elif entry.status == 'already_documented' %}
-                {% set counts.already_documented = counts.already_documented + 1 %}
-            {% elif entry.status == 'unresolved' %}
-                {% set counts.unresolved = counts.unresolved + 1 %}
+        {# ── Step 4: Count results ── #}
+        {% set c = namespace(inherit=0, resolve=0, override=0, ambiguous=0, no_match=0, unresolved=0) %}
+        {% for r in results %}
+            {% if r.action == 'inherit' %}{% set c.inherit = c.inherit + 1 %}
+            {% elif r.action == 'resolve' %}{% set c.resolve = c.resolve + 1 %}
+            {% elif r.action == 'override' %}{% set c.override = c.override + 1 %}
+            {% elif r.action == 'ambiguous' %}{% set c.ambiguous = c.ambiguous + 1 %}
+            {% elif r.action == 'no_match' %}{% set c.no_match = c.no_match + 1 %}
+            {% elif r.action == 'unresolved' %}{% set c.unresolved = c.unresolved + 1 %}
             {% endif %}
         {% endfor %}
 
-        {{ log("  Summary: " ~ counts.inherited ~ " inherited | " ~ counts.resolved ~ " resolved | " ~ counts.ambiguous ~ " ambiguous | " ~ counts.no_source ~ " no_source | " ~ counts.unresolved ~ " unresolved | " ~ counts.already_documented ~ " already_documented", info=True) }}
-        {{ log("", info=True) }}
-
-        {% set actionable = [] %}
-        {% for entry in report_entries %}
-            {% if entry.status != 'already_documented' %}
-                {% do actionable.append(entry) %}
+        {% set writable = [] %}
+        {% for r in results %}
+            {% if r.action in ['inherit', 'resolve', 'override'] %}
+                {% do writable.append(r) %}
             {% endif %}
         {% endfor %}
 
-        {% if actionable | length > 0 %}
+        {# ── Step 5: Build full output using print() (no timestamps) ── #}
+        {% set out = [] %}
+        {% set bar = "═" * 120 %}
+        {% set thin = "─" * 120 %}
 
-            {% set w = namespace(col=11, status=6, desc=21, target=11, source=11) %}
-            {% for entry in actionable %}
-                {% set col_display = entry.model_name ~ '.' ~ entry.column_name %}
-                {% set desc_display = entry.inherited_description[:50] if entry.inherited_description else '—' %}
-                {% set target_display = entry.target_file_path if entry.target_file_path else '—' %}
-                {% set source_display = entry.source_file_path if entry.source_file_path else '—' %}
-                {% if col_display | length > w.col %}
-                    {% set w.col = col_display | length %}
-                {% endif %}
-                {% if entry.status | length > w.status %}
-                    {% set w.status = entry.status | length %}
-                {% endif %}
-                {% if desc_display | length > w.desc %}
-                    {% set w.desc = desc_display | length %}
-                {% endif %}
-                {% if target_display | length > w.target %}
-                    {% set w.target = target_display | length %}
-                {% endif %}
-                {% if source_display | length > w.source %}
-                    {% set w.source = source_display | length %}
-                {% endif %}
+        {% do out.append("") %}
+        {% do out.append(bar) %}
+        {% do out.append("  dbt_doc_inherit: Propagation Report") %}
+        {% do out.append(bar) %}
+        {% do out.append("") %}
+        {% if from_paths | length == 1 %}
+            {% do out.append("  From:   " ~ from_paths[0]) %}
+        {% else %}
+            {% do out.append("  From:") %}
+            {% for fp in from_paths %}
+                {% do out.append("    - " ~ fp) %}
+            {% endfor %}
+        {% endif %}
+        {% do out.append("  To:     " ~ to_path) %}
+        {% do out.append("  Type:   " ~ mode) %}
+        {% do out.append("") %}
+
+        {# Report table #}
+        {% if results | length > 0 %}
+            {% set w = namespace(col=6, action=6, desc=11, src=6) %}
+            {% for r in results %}
+                {% set cd = r.model ~ '.' ~ r.column %}
+                {% set dd = r.new_desc[:50] if r.new_desc else '' %}
+                {% if cd | length > w.col %}{% set w.col = cd | length %}{% endif %}
+                {% if r.action | length > w.action %}{% set w.action = r.action | length %}{% endif %}
+                {% if dd | length > w.desc %}{% set w.desc = dd | length %}{% endif %}
+                {% if r.source_ref | length > w.src %}{% set w.src = r.source_ref | length %}{% endif %}
             {% endfor %}
 
-            {% set h_col = 'Column' ~ ' ' * (w.col - 6) %}
-            {% set h_status = 'Status' ~ ' ' * (w.status - 6) %}
-            {% set h_desc = 'Inherited Description' ~ ' ' * (w.desc - 21) %}
-            {% set h_target = 'Target File' ~ ' ' * (w.target - 11) %}
-            {% set h_source = 'Source File' ~ ' ' * (w.source - 11) %}
+            {# Header #}
+            {% do out.append(
+                "  " ~ 'Column' ~ ' ' * (w.col - 6)
+                ~ "  " ~ 'Action' ~ ' ' * (w.action - 6)
+                ~ "  " ~ 'Description' ~ ' ' * (w.desc - 11)
+                ~ "  " ~ 'Source' ~ ' ' * (w.src - 6)
+            ) %}
 
-            {{ log("  " ~ h_col ~ "  " ~ h_status ~ "  " ~ h_desc ~ "  " ~ h_target ~ "  " ~ h_source, info=True) }}
-
-            {% set sep = namespace(col='', status='', desc='', target='', source='') %}
+            {# Separator #}
+            {% set sep = namespace(col='', action='', desc='', src='') %}
             {% for i in range(w.col) %}{% set sep.col = sep.col ~ '─' %}{% endfor %}
-            {% for i in range(w.status) %}{% set sep.status = sep.status ~ '─' %}{% endfor %}
+            {% for i in range(w.action) %}{% set sep.action = sep.action ~ '─' %}{% endfor %}
             {% for i in range(w.desc) %}{% set sep.desc = sep.desc ~ '─' %}{% endfor %}
-            {% for i in range(w.target) %}{% set sep.target = sep.target ~ '─' %}{% endfor %}
-            {% for i in range(w.source) %}{% set sep.source = sep.source ~ '─' %}{% endfor %}
+            {% for i in range(w.src) %}{% set sep.src = sep.src ~ '─' %}{% endfor %}
+            {% do out.append("  " ~ sep.col ~ "  " ~ sep.action ~ "  " ~ sep.desc ~ "  " ~ sep.src) %}
 
-            {{ log("  " ~ sep.col ~ "  " ~ sep.status ~ "  " ~ sep.desc ~ "  " ~ sep.target ~ "  " ~ sep.source, info=True) }}
-
-            {% for entry in actionable %}
-                {% set col_val = entry.model_name ~ '.' ~ entry.column_name %}
-                {% set desc_val = entry.inherited_description[:50] if entry.inherited_description else '—' %}
-                {% set target_val = entry.target_file_path if entry.target_file_path else '—' %}
-                {% set source_val = entry.source_file_path if entry.source_file_path else '—' %}
-
-                {% set col_pad = col_val ~ ' ' * (w.col - col_val | length) %}
-                {% set status_pad = entry.status ~ ' ' * (w.status - entry.status | length) %}
-                {% set desc_pad = desc_val ~ ' ' * (w.desc - desc_val | length) %}
-                {% set target_pad = target_val ~ ' ' * (w.target - target_val | length) %}
-                {% set source_pad = source_val ~ ' ' * (w.source - source_val | length) %}
-
-                {{ log("  " ~ col_pad ~ "  " ~ status_pad ~ "  " ~ desc_pad ~ "  " ~ target_pad ~ "  " ~ source_pad, info=True) }}
+            {# Rows #}
+            {% for r in results %}
+                {% set cv = r.model ~ '.' ~ r.column %}
+                {% set dv = r.new_desc[:50] if r.new_desc else '' %}
+                {% do out.append(
+                    "  " ~ cv ~ ' ' * (w.col - cv | length)
+                    ~ "  " ~ r.action ~ ' ' * (w.action - r.action | length)
+                    ~ "  " ~ dv ~ ' ' * (w.desc - dv | length)
+                    ~ "  " ~ r.source_ref ~ ' ' * (w.src - r.source_ref | length)
+                ) %}
             {% endfor %}
         {% else %}
-            {{ log("  All columns are already documented. Nothing to propagate.", info=True) }}
+            {% do out.append("  No columns to process. Ensure your target YAML has '- name: column_name' entries.") %}
         {% endif %}
 
-        {{ log("", info=True) }}
-        {{ log("═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════", info=True) }}
-        {{ log("dbt_doc_inherit: Complete. " ~ report_entries | length ~ " columns processed.", info=True) }}
+        {# Summary after the table #}
+        {% do out.append("") %}
+        {% do out.append("  Source columns available: " ~ from_columns | length) %}
+        {% do out.append("  Summary: " ~ c.inherit ~ " inherited | " ~ c.resolve ~ " resolved | " ~ c.override ~ " overridden | " ~ c.ambiguous ~ " ambiguous | " ~ c.no_match ~ " no match | " ~ c.unresolved ~ " unresolved") %}
+
+        {# YAML snippets #}
+        {% if writable | length > 0 %}
+            {% do out.append("") %}
+            {% do out.append(thin) %}
+            {% do out.append("  YAML Output — Copy into " ~ to_path ~ ":") %}
+            {% do out.append(thin) %}
+
+            {# Group by model #}
+            {% set models_seen = [] %}
+            {% for r in writable %}
+                {% if r.model not in models_seen %}
+                    {% do models_seen.append(r.model) %}
+                {% endif %}
+            {% endfor %}
+
+            {% for model_name in models_seen %}
+                {% do out.append('') %}
+                {% do out.append('# ── ' ~ model_name ~ ' ──') %}
+                {% for r in writable %}
+                    {% if r.model == model_name %}
+                        {% set escaped = r.new_desc | replace('"', '\\"') %}
+                        {% do out.append('- name: ' ~ r.column) %}
+                        {% do out.append('  description: "' ~ escaped ~ '"') %}
+                    {% endif %}
+                {% endfor %}
+            {% endfor %}
+
+            {% do out.append("") %}
+        {% elif results | length > 0 %}
+            {% do out.append("") %}
+            {% do out.append("  No descriptions to propagate. Use 'Inherited: model.column' for ambiguous columns.") %}
+        {% endif %}
+
+        {% do out.append("") %}
+        {% do out.append(bar) %}
+        {% do out.append("  dbt_doc_inherit: Complete. " ~ results | length ~ " columns processed, " ~ writable | length ~ " descriptions ready.") %}
+        {% do out.append(bar) %}
+
+        {{ print(out | join('\n')) }}
 
     {% endif %}
 {% endmacro %}
