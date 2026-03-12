@@ -187,22 +187,35 @@ def write_to_yaml(entries):
             col_name = update["column_name"]
             new_desc = update["inherited_description"].replace("\\", "\\\\").replace('"', '\\"')
 
-            # Case 1: Column has a description line — replace its value
-            pattern = rf'(- name: {re.escape(col_name)}\s*\n(\s+)description:\s*)"[^"]*"'
-            new_content = re.sub(pattern, rf'\1"{new_desc}"', content, count=1)
+            # Case 1: Column has a description line (possibly with blank lines between)
+            # Match: "- name: col_name" then optional blank lines, then "description: ..."
+            # Preserve existing whitespace/formatting between name and description
+            pattern = rf'(- name: {re.escape(col_name)}[ \t]*\n(?:\s*\n)*\s+description:\s*)"[^"]*"'
+            replacement = rf'\1"{new_desc}"'
+            new_content = re.sub(pattern, replacement, content, count=1)
 
             if new_content != content:
                 content = new_content
                 changes += 1
             else:
-                # Case 2: Column exists but has no description line — insert one
-                match = re.search(rf'(\s+)(- name: {re.escape(col_name)})\s*\n', content)
+                # Case 2: Column exists but has NO description line at all
+                # Only insert if the next non-blank line is NOT a description line
+                match = re.search(
+                    rf'(\s+)(- name: {re.escape(col_name)})[ \t]*\n',
+                    content
+                )
                 if match:
-                    indent = match.group(1) + "  "
-                    old_str = match.group(0)
-                    new_str = f"{match.group(1)}{match.group(2)}\n{indent}description: \"{new_desc}\"\n"
-                    content = content.replace(old_str, new_str, 1)
-                    changes += 1
+                    # Check what follows: skip blank lines and see if description already exists
+                    end_pos = match.end()
+                    rest = content[end_pos:]
+                    # Strip leading blank lines to peek at next content line
+                    stripped = rest.lstrip('\n')
+                    if not stripped.lstrip().startswith('description:'):
+                        indent = match.group(1) + "  "
+                        old_str = match.group(0)
+                        new_str = f"{match.group(1)}{match.group(2)}\n{indent}description: \"{new_desc}\"\n"
+                        content = content.replace(old_str, new_str, 1)
+                        changes += 1
 
         if changes > 0 and content != original:
             path.write_text(content)
