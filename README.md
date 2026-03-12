@@ -42,7 +42,7 @@ dbt deps
 |---|---|---|
 | **Command** | `dbt run-operation propagate_descriptions --args '{...}'` | `python dbt_packages/dbt_doc_inherit/propagate.py` |
 | **Writes to YAML** | No — outputs YAML for you to copy-paste | Yes — writes directly to your YAML files |
-| **Requires Python** | No — pure Jinja | Yes — Python 3 (no extra pip packages) |
+| **Requires Python** | No  | Yes — Python 3 (no extra pip packages) |
 | **Scope** | You choose source (`from`) and target (`to`) files | Scans entire project DAG automatically |
 | **Best for** | Targeted inheritance, quick lookups | Bulk population of an entire project |
 
@@ -51,8 +51,8 @@ dbt deps
 Both approaches use the same resolution logic:
 
 1. **Auto-inherit by name** — if a column in the target has an empty description and the same column name exists in a source model with a description, it inherits automatically
-2. **Explicit directive** — for renamed or ambiguous columns, write `description: "Inherited: model_name.column_name"` in your YAML. The package resolves it to the actual description
-3. **Ambiguous detection** — if the same column name exists in multiple source models, it's flagged as ambiguous. Use the `"Inherited:"` directive to specify which source to use
+2. **Explicit directive** — for renamed or ambiguous columns, Use `description: "Inherited: model_name.column_name"` in your YAML. The package resolves it to the actual description
+3. **Ambiguous detection** — if the same column name exists in multiple source models, it's flagged as ambiguous. Use the `description: "Inherited: model_name.column_name"` directive to specify which source to use
 
 ### Status Values
 
@@ -67,6 +67,46 @@ Both approaches use the same resolution logic:
 | `already_documented` | Column already has its own description | Skipped (hidden from reports) |
 
 ---
+## The `"Inherited:"` Directive
+
+For columns where auto-matching by name doesn't work (renamed columns, ambiguous matches), write the directive string directly in your YAML:
+
+```yaml
+description: "Inherited: <model_name>.<column_name>"
+```
+
+### When to Use It
+
+| Scenario | Example | Why auto-matching fails |
+|----------|---------|------------------------|
+| **Renamed column** | `user_id` -> `customer_id` | Names don't match |
+| **Ambiguous column** | `artist_name` exists in `dim_songs`, `fct_streams`, and `dim_artists` | Multiple parents have the same column |
+| **Prefixed column** | `artist_total_albums` comes from `dim_artists.total_albums` | Names don't match |
+
+### Examples
+
+```yaml
+columns:
+  # Renamed column — user_id in source, customer_id here
+  - name: customer_id
+    description: "Inherited: stg_users.user_id"
+
+  # Ambiguous — specify which parent model
+  - name: artist_name
+    description: "Inherited: dim_artists.artist_name"
+
+  # Prefixed column — OBT renamed total_albums to artist_total_albums
+  - name: artist_total_albums
+    description: "Inherited: dim_artists.total_albums"
+
+  # Source table reference
+  - name: order_date
+    description: "Inherited: raw_orders.order_date"
+```
+
+> **Note:** The `"Inherited:"` string is a temporary placeholder. After running either approach, it gets replaced with the actual description from the referenced model.
+
+---
 
 ## Approach 1: `dbt run-operation` (Copy-Paste)
 
@@ -76,7 +116,8 @@ Both approaches use the same resolution logic:
 |----------|----------|-------------|
 | `from` | Yes | Source YAML file path(s). Comma-separated for multiple sources |
 | `to` | Yes | Target YAML file path where descriptions are needed |
-| `type` | No | `"missing"` (default) = only empty descriptions. `"all"` = inherit all matching columns, including overrides |
+| `type` | Depends | `"missing"` (default) = only empty descriptions. `"all"` = inherit all matching columns from source including overriding matching columsn in destination |
+
 
 ### Single Source File
 
@@ -84,17 +125,16 @@ When your target model inherits from one upstream model:
 
 ```bash
 dbt run-operation propagate_descriptions \
-  --args '{"from": "models/staging/_stg_users.yml", "to": "models/marts/_dim_users.yml", "type": "missing"}'
+  --args '{"from": "path/to/source.yml", "to": "path/to/target.yml", "type": "missing"}'
 ```
 
-### Multiple Source Files
+### Workflow
 
-When your target model inherits from several upstream models (e.g., an OBT joining users, songs, and streams), pass multiple `from` paths separated by commas:
-
-```bash
-dbt run-operation propagate_descriptions \
-  --args '{"from": "models/marts/_dim_users.yml,models/marts/_dim_songs.yml,models/marts/_fct_streams.yml", "to": "models/obt/_obt_models.yml", "type": "missing"}'
-```
+1. **Run the macro:**
+   ```bash
+   dbt run-operation propagate_descriptions \
+     --args '{"from": "models/marts/_dim_users.yml", "to": "models/obt/_obt_models.yml", "type": "missing"}'
+   ```
 
 ### Example Output (Single Source)
 
@@ -131,6 +171,27 @@ dbt run-operation propagate_descriptions \
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 ```
 
+2. **Use the `Inherited directive` and  then re-run:
+   ```yaml
+   columns:
+     - name: email
+      description: "User email address"
+    - name: signup_date
+      description: "Timestamp when user signed up"
+   - name: artist_country
+     description: "Inherited: dim_artists.country"  # renamed column
+   ```
+
+
+### Multiple Source Files
+
+When your target model inherits from several upstream models (e.g., an OBT joining users, songs, and streams), pass multiple `from` paths separated by commas:
+
+```bash
+dbt run-operation propagate_descriptions \
+  --args '{"from": "models/marts/_dim_users.yml,models/marts/_dim_songs.yml,models/marts/_fct_streams.yml", "to": "models/obt/_obt_models.yml", "type": "missing"}'
+```
+
 ### Example Output (Multiple Sources)
 
 ```
@@ -152,8 +213,8 @@ dbt run-operation propagate_descriptions \
   obt_customers.status                     ambiguous                                            dim_songs, fct_streams
   obt_customers.new_metric                 no_match
 
-  Source columns available: 47
-  Summary: 32 inherited | 3 resolved | 0 overridden | 5 ambiguous | 2 no match | 0 unresolved
+  Source columns available: 2
+  Summary: 2 inherited | 0 resolved | 0 overridden | 1 ambiguous | 1 no match | 0 unresolved
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   YAML Output — Copy into models/obt/_obt_models.yml:
@@ -170,26 +231,6 @@ dbt run-operation propagate_descriptions \
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 ```
 
-### Workflow
-
-1. **List your columns** in the target YAML with empty descriptions:
-   ```yaml
-   columns:
-     - name: email           # empty — will auto-inherit
-     - name: signup_date     # empty — will auto-inherit
-     - name: artist_country
-       description: "Inherited: dim_artists.country"  # renamed column — explicit directive
-   ```
-
-2. **Run the macro:**
-   ```bash
-   dbt run-operation propagate_descriptions \
-     --args '{"from": "models/marts/_dim_users.yml", "to": "models/obt/_obt_models.yml", "type": "missing"}'
-   ```
-
-3. **Copy the YAML output** from the terminal into your target YAML file, replacing the empty/`"Inherited:"` entries with the resolved descriptions.
-
-4. **For ambiguous columns**, add an `"Inherited:"` directive specifying which source model to use, then re-run.
 
 ---
 
@@ -242,7 +283,7 @@ dbt_doc_inherit: Processed 192 columns across all models.
   obt_song_performance.duration_category  inherited  Duration classification: Short (<3min), Medium (3-  models/obt/_obt_models.yml  models/marts/_dim_songs.yml
 
 ============================================================================================================================================
-  dbt_doc_inherit: Complete. 2 columns processed (190 already documented, skipped).
+  dbt_doc_inherit: Complete. 2 columns processed (192 already documented, skipped).
 ```
 
 Subsequent run (everything up to date):
@@ -265,88 +306,6 @@ dbt_doc_inherit: Processed 192 columns across all models.
 ============================================================================================================================================
 ```
 
-### Workflow
-
-1. **List your columns** in your YAML files with empty descriptions (same as Approach 1)
-
-2. **Run the script:**
-   ```bash
-   dbt parse && python dbt_packages/dbt_doc_inherit/propagate.py
-   ```
-
-3. **Check the report** — the script tells you which columns were written and which are ambiguous
-
-4. **For ambiguous columns**, add `"Inherited:"` directives to your YAML:
-   ```yaml
-   - name: artist_name
-     description: "Inherited: dim_artists.artist_name"
-   ```
-
-5. **Re-run** the script to resolve the directives:
-   ```bash
-   dbt parse && python dbt_packages/dbt_doc_inherit/propagate.py
-   ```
-   The script replaces `"Inherited: dim_artists.artist_name"` with the actual description (e.g., `"Artist or band name"`) directly in your YAML file.
-
-### Example
-
-**Before** running the script:
-```yaml
-columns:
-  - name: email              # no description — will auto-inherit
-  - name: artist_country
-    description: "Inherited: dim_artists.country"  # explicit directive
-```
-
-**After** running the script:
-```yaml
-columns:
-  - name: email
-    description: "User email address"
-  - name: artist_country
-    description: "Standardized country of origin"
-```
-
----
-
-## The `"Inherited:"` Directive
-
-For columns where auto-matching by name doesn't work (renamed columns, ambiguous matches), write the directive string directly in your YAML:
-
-```yaml
-description: "Inherited: <model_name>.<column_name>"
-```
-
-### When to Use It
-
-| Scenario | Example | Why auto-matching fails |
-|----------|---------|------------------------|
-| **Renamed column** | `user_id` -> `customer_id` | Names don't match |
-| **Ambiguous column** | `artist_name` exists in `dim_songs`, `fct_streams`, and `dim_artists` | Multiple parents have the same column |
-| **Prefixed column** | `artist_total_albums` comes from `dim_artists.total_albums` | Names don't match |
-
-### Examples
-
-```yaml
-columns:
-  # Renamed column — user_id in source, customer_id here
-  - name: customer_id
-    description: "Inherited: stg_users.user_id"
-
-  # Ambiguous — specify which parent model
-  - name: artist_name
-    description: "Inherited: dim_artists.artist_name"
-
-  # Prefixed column — OBT renamed total_albums to artist_total_albums
-  - name: artist_total_albums
-    description: "Inherited: dim_artists.total_albums"
-
-  # Source table reference
-  - name: order_date
-    description: "Inherited: raw_orders.order_date"
-```
-
-> **Note:** The `"Inherited:"` string is a temporary placeholder. After running either approach, it gets replaced with the actual description from the referenced model.
 
 ---
 
@@ -362,22 +321,16 @@ columns:
 
 5. **Model-scoped YAML writes** — the Python script identifies the correct model section in YAML files before writing, ensuring columns with duplicate names across models in the same file are updated correctly.
 
-## Known Limitations
+6. **Python script requires `dbt parse` first** — the script reads `target/manifest.json`, which must be up-to-date. Always run `dbt parse` before the script.
 
-1. **No SQL parsing** — auto-propagation matches by column name only. For JOINs that produce duplicate column names across parents, use `"Inherited:"` to disambiguate.
+7. **`"Inherited:"` shows in `dbt docs`** — if you run `dbt docs generate` before resolving the directives, the placeholder string appears in the docs site. Resolve all directives first.
 
-2. **`dbt run-operation` cannot write files** — dbt's Jinja sandbox blocks filesystem access. The macro outputs YAML to the console for manual copy-paste. Use the Python script if you want automatic file writes.
-
-3. **Python script requires `dbt parse` first** — the script reads `target/manifest.json`, which must be up-to-date. Always run `dbt parse` before the script.
-
-4. **`"Inherited:"` shows in `dbt docs`** — if you run `dbt docs generate` before resolving the directives, the placeholder string appears in the docs site. Resolve all directives first.
 
 ## Compatibility
 
 - **dbt Core**: `>=1.6.0, <2.0.0`
 - **Adapters**: Any (Snowflake, BigQuery, PostgreSQL, Redshift, Databricks, DuckDB, etc.)
-- **Dependencies**: None — no external dbt packages required
-- **Python script**: Python 3.6+ (standard library only, no pip packages)
+- **Python script**: Python 3.6+
 
 ## License
 
