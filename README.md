@@ -126,7 +126,7 @@ columns:
 |----------|----------|-------------|
 | `from` | Yes | Source YAML file path(s). Comma-separated for multiple sources |
 | `to` | Yes | Target YAML file path where descriptions are needed |
-| `type` | Depends | `"missing"` (default) = only empty descriptions. `"all"` = inherit all matching columns from source including overriding matching columsn in destination |
+| `type` | Depends | `"missing"` (default) = only empty descriptions. `"all"` = inherit all matching columns from source including overriding matching columns in destination |
 
 
 ### Single Source File
@@ -181,15 +181,15 @@ dbt run-operation propagate_descriptions \
 ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 ```
 
-2. **Use the `Inherited directive` and  then re-run:
+2. **Use the `Inherited:` directive** for ambiguous or renamed columns, then re-run:
    ```yaml
    columns:
      - name: email
-      description: "User email address"
-    - name: signup_date
-      description: "Timestamp when user signed up"
-   - name: artist_country
-     description: "Inherited: dim_artists.country"  # renamed column
+       description: "User email address"
+     - name: signup_date
+       description: "Timestamp when user signed up"
+     - name: artist_country
+       description: "Inherited: dim_artists.country"  # renamed column
    ```
 
 
@@ -223,8 +223,8 @@ dbt run-operation propagate_descriptions \
   obt_customers.status                     ambiguous                                            dim_songs, fct_streams
   obt_customers.new_metric                 no_match
 
-  Source columns available: 2
-  Summary: 2 inherited | 0 resolved | 0 overridden | 1 ambiguous | 1 no match | 0 unresolved
+  Source columns available: 47
+  Summary: 1 inherited | 1 resolved | 0 overridden | 1 ambiguous | 1 no match | 0 unresolved
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   YAML Output — Copy into models/obt/_obt_models.yml:
@@ -293,7 +293,7 @@ dbt_doc_inherit: Processed 192 columns across all models.
   obt_song_performance.duration_category  inherited  Duration classification: Short (<3min), Medium (3-  models/obt/_obt_models.yml  models/marts/_dim_songs.yml
 
 ============================================================================================================================================
-  dbt_doc_inherit: Complete. 2 columns processed (192 already documented, skipped).
+  dbt_doc_inherit: Complete. 2 columns processed (190 already documented, skipped).
 ```
 
 Subsequent run (everything up to date):
