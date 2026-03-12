@@ -20,12 +20,22 @@ Both approaches support:
 
 ## Installation
 
-Add to your `packages.yml`:
+Add to your `packages.yml` using either option:
+
+**Option 1: dbt Hub (recommended)**
+
+```yaml
+packages:
+  - package: tripleaceme/dbt_doc_inherit
+    version: [">=1.0.0", "<2.0.0"]
+```
+
+**Option 2: Git**
 
 ```yaml
 packages:
   - git: "https://github.com/tripleaceme/dbt-doc-inherit.git"
-    revision: master
+    revision: v1.0.0  # or master for latest
 ```
 
 Then run:
