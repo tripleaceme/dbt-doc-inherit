@@ -1,16 +1,14 @@
 {% macro propagate_descriptions() %}
     {#--
-        Main run-operation: Propagate column descriptions along the dbt DAG.
+        Propagate column descriptions along the dbt DAG.
 
-        Auto-inherits descriptions by matching column names between parent
-        and child models. For renamed or ambiguous columns, users can use
-        the "Inherited: model_name.column_name" placeholder in their YAML.
+        Shows a report of which columns can inherit descriptions from upstream.
+        To write descriptions to your YAML files, run the Python script:
 
-        Usage:
+            python dbt_packages/dbt_doc_inherit/propagate.py
+
+        To preview the report only (no file changes):
             dbt run-operation propagate_descriptions
-
-        Output:
-            - Formatted report logged to console
     --#}
 
     {% if execute %}
@@ -18,7 +16,6 @@
         {# ── Step 1: Build column catalog from graph ── #}
         {% set column_catalog = {} %}
 
-        {# Models and seeds #}
         {% for node in graph.nodes.values() %}
             {% if node.resource_type in ['model', 'seed'] %}
                 {% set node_columns = {} %}
@@ -48,7 +45,6 @@
             {% endif %}
         {% endfor %}
 
-        {# Sources #}
         {% for source in graph.sources.values() %}
             {% set source_columns = {} %}
             {% for col_name, col in source.columns.items() %}
@@ -114,7 +110,6 @@
                     ) %}
 
                     {% if desc.startswith(inherit_pattern) %}
-                        {# ── Case 1: Explicit "Inherited: model.column" directive ── #}
                         {% set directive = desc[inherit_pattern | length:] %}
                         {% set parts = directive.split('.') %}
                         {% if parts | length >= 2 %}
@@ -149,7 +144,6 @@
                         {% endif %}
 
                     {% elif desc | length == 0 %}
-                        {# ── Case 2: Empty description — try auto-inherit by name ── #}
                         {% if col_name in parent_column_map %}
                             {% set matches = parent_column_map[col_name] %}
                             {% if matches | length == 1 %}
@@ -173,7 +167,6 @@
                         {% endif %}
 
                     {% else %}
-                        {# ── Case 3: Has a real description — already documented ── #}
                         {% set entry.status = 'already_documented' %}
                         {% set entry.inherited_description = desc %}
                     {% endif %}
@@ -202,7 +195,6 @@
         {{ log("═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════", info=True) }}
         {{ log("", info=True) }}
 
-        {# Count by status #}
         {% set counts = namespace(inherited=0, resolved=0, ambiguous=0, no_source=0, already_documented=0, unresolved=0) %}
 
         {% for entry in report_entries %}
@@ -224,7 +216,6 @@
         {{ log("  Summary: " ~ counts.inherited ~ " inherited | " ~ counts.resolved ~ " resolved | " ~ counts.ambiguous ~ " ambiguous | " ~ counts.no_source ~ " no_source | " ~ counts.unresolved ~ " unresolved | " ~ counts.already_documented ~ " already_documented", info=True) }}
         {{ log("", info=True) }}
 
-        {# Collect actionable entries (exclude already_documented) #}
         {% set actionable = [] %}
         {% for entry in report_entries %}
             {% if entry.status != 'already_documented' %}
@@ -234,7 +225,6 @@
 
         {% if actionable | length > 0 %}
 
-            {# ── Compute max widths for each column ── #}
             {% set w = namespace(col=11, status=6, desc=21, target=11, source=11) %}
             {% for entry in actionable %}
                 {% set col_display = entry.model_name ~ '.' ~ entry.column_name %}
@@ -258,7 +248,6 @@
                 {% endif %}
             {% endfor %}
 
-            {# ── Build padded header ── #}
             {% set h_col = 'Column' ~ ' ' * (w.col - 6) %}
             {% set h_status = 'Status' ~ ' ' * (w.status - 6) %}
             {% set h_desc = 'Inherited Description' ~ ' ' * (w.desc - 21) %}
@@ -267,7 +256,6 @@
 
             {{ log("  " ~ h_col ~ "  " ~ h_status ~ "  " ~ h_desc ~ "  " ~ h_target ~ "  " ~ h_source, info=True) }}
 
-            {# ── Build separator line using namespace to survive loop scoping ── #}
             {% set sep = namespace(col='', status='', desc='', target='', source='') %}
             {% for i in range(w.col) %}{% set sep.col = sep.col ~ '─' %}{% endfor %}
             {% for i in range(w.status) %}{% set sep.status = sep.status ~ '─' %}{% endfor %}
@@ -277,14 +265,12 @@
 
             {{ log("  " ~ sep.col ~ "  " ~ sep.status ~ "  " ~ sep.desc ~ "  " ~ sep.target ~ "  " ~ sep.source, info=True) }}
 
-            {# ── Print each row with padding ── #}
             {% for entry in actionable %}
                 {% set col_val = entry.model_name ~ '.' ~ entry.column_name %}
                 {% set desc_val = entry.inherited_description[:50] if entry.inherited_description else '—' %}
                 {% set target_val = entry.target_file_path if entry.target_file_path else '—' %}
                 {% set source_val = entry.source_file_path if entry.source_file_path else '—' %}
 
-                {# Pad each value to its column width #}
                 {% set col_pad = col_val ~ ' ' * (w.col - col_val | length) %}
                 {% set status_pad = entry.status ~ ' ' * (w.status - entry.status | length) %}
                 {% set desc_pad = desc_val ~ ' ' * (w.desc - desc_val | length) %}
